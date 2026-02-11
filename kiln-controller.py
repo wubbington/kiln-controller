@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+import time
 import os
 import sys
 import logging
@@ -13,15 +14,8 @@ from gevent.pywsgi import WSGIServer
 from geventwebsocket.handler import WebSocketHandler
 from geventwebsocket import WebSocketError
 
-
-try:
-    sys.dont_write_bytecode = True
-    import config
-    sys.dont_write_bytecode = False
-except:
-    print ("Could not import config file.")
-    print ("Copy config.py.EXAMPLE to config.py and adapt it for your setup.")
-    exit(1)
+# try/except removed here on purpose so folks can see why things break
+import config
 
 logging.basicConfig(level=config.log_level, format=config.log_format)
 log = logging.getLogger("kiln-controller")
@@ -29,7 +23,7 @@ log.info("Starting kiln controller")
 
 script_dir = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, script_dir + '/lib/')
-profile_path = os.path.join(script_dir, "storage", "profiles")
+profile_path = config.kiln_profiles_directory
 
 from oven import SimulatedOven, RealOven, Profile
 from ovenWatcher import OvenWatcher
@@ -43,15 +37,29 @@ else:
     log.info("this is a real kiln")
     oven = RealOven()
 ovenWatcher = OvenWatcher(oven)
+# this ovenwatcher is used in the oven class for restarts
+oven.set_ovenwatcher(ovenWatcher)
 
 @app.route('/')
 def index():
     return bottle.redirect('/picoreflow/index.html')
 
+@app.route('/state')
+def state():
+    return bottle.redirect('/picoreflow/state.html')
+
+@app.get('/api/stats')
+def handle_api():
+    log.info("/api/stats command received")
+    if hasattr(oven,'pid'):
+        if hasattr(oven.pid,'pidstats'):
+            return json.dumps(oven.pid.pidstats)
+
+
 @app.post('/api')
 def handle_api():
     log.info("/api is alive")
-    log.info(bottle.request.json)
+
 
     # run a kiln schedule
     if bottle.request.json['cmd'] == 'run':
@@ -64,6 +72,11 @@ def handle_api():
         if 'startat' in bottle.request.json:
             startat = bottle.request.json['startat']
 
+        #Shut off seek if start time has been set
+        allow_seek = True
+        if startat > 0:
+            allow_seek = False
+
         # get the wanted profile/kiln schedule
         profile = find_profile(wanted)
         if profile is None:
@@ -72,12 +85,32 @@ def handle_api():
         # FIXME juggling of json should happen in the Profile class
         profile_json = json.dumps(profile)
         profile = Profile(profile_json)
-        oven.run_profile(profile,startat=startat)
+        oven.run_profile(profile, startat=startat, allow_seek=allow_seek)
         ovenWatcher.record(profile)
+
+    if bottle.request.json['cmd'] == 'pause':
+        log.info("api pause command received")
+        oven.state = 'PAUSED'
+
+    if bottle.request.json['cmd'] == 'resume':
+        log.info("api resume command received")
+        oven.state = 'RUNNING'
 
     if bottle.request.json['cmd'] == 'stop':
         log.info("api stop command received")
         oven.abort_run()
+
+    if bottle.request.json['cmd'] == 'memo':
+        log.info("api memo command received")
+        memo = bottle.request.json['memo']
+        log.info("memo=%s" % (memo))
+
+    # get stats during a run
+    if bottle.request.json['cmd'] == 'stats':
+        log.info("api stats command received")
+        if hasattr(oven,'pid'):
+            if hasattr(oven.pid,'pidstats'):
+                return json.dumps(oven.pid.pidstats)
 
     return { "success" : True }
 
@@ -142,6 +175,7 @@ def handle_control():
                 elif msgdict.get("cmd") == "STOP":
                     log.info("Stop command received")
                     oven.abort_run()
+            time.sleep(1)
         except WebSocketError as e:
             log.error(e)
             break
@@ -189,6 +223,7 @@ def handle_storage():
 
                     wsock.send(json.dumps(msgdict))
                     wsock.send(get_profiles())
+            time.sleep(1) 
         except WebSocketError:
             break
     log.info("websocket (storage) closed")
@@ -204,6 +239,7 @@ def handle_config():
             wsock.send(get_config())
         except WebSocketError:
             break
+        time.sleep(1)
     log.info("websocket (config) closed")
 
 
@@ -218,6 +254,7 @@ def handle_status():
             wsock.send("Your message was: %r" % message)
         except WebSocketError:
             break
+        time.sleep(1)
     log.info("websocket (status) closed")
 
 
@@ -230,10 +267,12 @@ def get_profiles():
     for filename in profile_files:
         with open(os.path.join(profile_path, filename), 'r') as f:
             profiles.append(json.load(f))
+    profiles = normalize_temp_units(profiles)
     return json.dumps(profiles)
 
 
 def save_profile(profile, force=False):
+    profile=add_temp_units(profile)
     profile_json = json.dumps(profile)
     filename = profile['name']+".json"
     filepath = os.path.join(profile_path, filename)
@@ -246,6 +285,46 @@ def save_profile(profile, force=False):
     log.info("Wrote %s" % filepath)
     return True
 
+def add_temp_units(profile):
+    """
+    always store the temperature in degrees c
+    this way folks can share profiles
+    """
+    if "temp_units" in profile:
+        return profile
+    profile['temp_units']="c"
+    if config.temp_scale=="c":
+        return profile
+    if config.temp_scale=="f":
+        profile=convert_to_c(profile);
+        return profile
+
+def convert_to_c(profile):
+    newdata=[]
+    for (secs,temp) in profile["data"]:
+        temp = (5/9)*(temp-32)
+        newdata.append((secs,temp))
+    profile["data"]=newdata
+    return profile
+
+def convert_to_f(profile):
+    newdata=[]
+    for (secs,temp) in profile["data"]:
+        temp = ((9/5)*temp)+32
+        newdata.append((secs,temp))
+    profile["data"]=newdata
+    return profile
+
+def normalize_temp_units(profiles):
+    normalized = []
+    for profile in profiles:
+        if "temp_units" in profile:
+            if config.temp_scale == "f" and profile["temp_units"] == "c": 
+                profile = convert_to_f(profile)
+                profile["temp_units"] = "f"
+        normalized.append(profile)
+    return normalized
+
 def delete_profile(profile):
     profile_json = json.dumps(profile)
     filename = profile['name']+".json"
@@ -254,7 +333,6 @@ def delete_profile(profile):
     log.info("Deleted %s" % filepath)
     return True
 
-
 def get_config():
     return json.dumps({"temp_scale": config.temp_scale,
         "time_scale_slope": config.time_scale_slope,
@@ -262,9 +340,8 @@ def get_config():
         "kwh_rate": config.kwh_rate,
         "currency_type": config.currency_type})    
 
-
 def main():
-    ip = config.listening_ip
+    ip = "0.0.0.0"
     port = config.listening_port
     log.info("listening on %s:%d" % (ip, port))
 

@@ -8,3 +8,5 @@ thumbs.db
 #storage/profiles
 #config.py
 .idea/*
+state.json
+venv/*

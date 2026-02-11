@@ -8,7 +8,7 @@ var selected_profile = 0;
 var selected_profile_name = 'cone-05-long-bisque.json';
 var temp_scale = "c";
 var time_scale_slope = "s";
-var time_scale_profile = "s";
+var time_scale_profile = "h";
 var time_scale_long = "Seconds";
 var temp_scale_display = "C";
 var kwh_rate = 0.26;
@@ -188,23 +188,24 @@ function hazardTemp(){
     }
 }
 
-function timeTickFormatter(val)
+function timeTickFormatter(val,axis)
 {
-    if (val < 1800)
-    {
-        return val;
-    }
-    else
-    {
-        var hours = Math.floor(val / (3600));
-        var div_min = val % (3600);
-        var minutes = Math.floor(div_min / 60);
+// hours
+if(axis.max>3600) {
+  //var hours = Math.floor(val / (3600));
+  //return hours;
+  return Math.floor(val/3600);
+  }
 
-        if (hours   < 10) {hours   = "0"+hours;}
-        if (minutes < 10) {minutes = "0"+minutes;}
+// minutes
+if(axis.max<=3600) {
+  return Math.floor(val/60);
+  }
 
-        return hours+":"+minutes;
-    }
+// seconds
+if(axis.max<=60) {
+  return val;
+  }
 }
 
 function runTask()
@@ -273,6 +274,7 @@ function enterEditMode()
     graph.profile.draggable = true;
     graph.plot = $.plot("#graph_container", [ graph.profile, graph.live ], getOptions());
     updateProfileTable();
+    toggleTable();
 }
 
 function leaveEditMode()
@@ -366,6 +368,18 @@ function saveProfile()
     leaveEditMode();
 }
 
+function get_tick_size() {
+//switch(time_scale_profile){
+//  case "s":
+//    return 1;
+//  case "m":
+//    return 60;
+//  case "h":
+//    return 3600;
+//  }
+return 3600;
+}
+
 function getOptions()
 {
 
@@ -395,6 +409,7 @@ function getOptions()
       min: 0,
       tickColor: 'rgba(216, 211, 197, 0.2)',
       tickFormatter: timeTickFormatter,
+      tickSize: get_tick_size(),
       font:
       {
         size: 14,
@@ -459,17 +474,17 @@ $(document).ready(function()
         {
             console.log("Status Socket has been opened");
 
-            $.bootstrapGrowl("<span class=\"glyphicon glyphicon-exclamation-sign\"></span>Getting data from server",
-            {
-            ele: 'body', // which element to append to
-            type: 'success', // (null, 'info', 'error', 'success')
-            offset: {from: 'top', amount: 250}, // 'top', or 'bottom'
-            align: 'center', // ('left', 'right', or 'center')
-            width: 385, // (integer, or 'auto')
-            delay: 2500,
-            allow_dismiss: true,
-            stackup_spacing: 10 // spacing between consecutively stacked growls.
-            });
+//            $.bootstrapGrowl("<span class=\"glyphicon glyphicon-exclamation-sign\"></span>Getting data from server",
+//            {
+//            ele: 'body', // which element to append to
+//            type: 'success', // (null, 'info', 'error', 'success')
+//            offset: {from: 'top', amount: 250}, // 'top', or 'bottom'
+//            align: 'center', // ('left', 'right', or 'center')
+//            width: 385, // (integer, or 'auto')
+//            delay: 2500,
+//            allow_dismiss: true,
+//            stackup_spacing: 10 // spacing between consecutively stacked growls.
+//            });
         };
 
         ws_status.onclose = function()
@@ -488,9 +503,6 @@ $(document).ready(function()
 
         ws_status.onmessage = function(e)
         {
-            console.log("received status data")
-            console.log(e.data);
-
             x = JSON.parse(e.data);
             if (x.type == "backlog")
             {
@@ -514,11 +526,11 @@ $(document).ready(function()
             if(state!="EDIT")
             {
                 state = x.state;
-
                 if (state!=state_last)
                 {
-                    if(state_last == "RUNNING")
+                    if(state_last == "RUNNING" && state != "PAUSED" )
                     {
+			console.log(state);
                         $('#target_temp').html('---');
                         updateProgress(0);
                         $.bootstrapGrowl("<span class=\"glyphicon glyphicon-exclamation-sign\"></span> <b>Run completed</b>", {
@@ -548,6 +560,8 @@ $(document).ready(function()
                     updateProgress(parseFloat(x.runtime)/parseFloat(x.totaltime)*100);
                     $('#state').html('<span class="glyphicon glyphicon-time" style="font-size: 22px; font-weight: normal"></span><span style="font-family: Digi; font-size: 40px;">' + eta + '</span>');
                     $('#target_temp').html(parseInt(x.target));
+                    $('#cost').html(x.currency_type + parseFloat(x.cost).toFixed(2));
+                  
 
 
                 }
@@ -559,10 +573,12 @@ $(document).ready(function()
                 }
 
                 $('#act_temp').html(parseInt(x.temperature));
-
-		if (x.heat > 0.0) {
-	            setTimeout(function() { $('#heat').addClass("ds-led-heat-active") }, 0 )
-	            setTimeout(function() { $('#heat').removeClass("ds-led-heat-active") }, (x.heat*1000.0)-5)
+                heat_rate = parseInt(x.heat_rate)
+                if (heat_rate > 9999) { heat_rate = 9999; }
+                if (heat_rate < -9999) { heat_rate = -9999; }
+                $('#heat_rate').html(heat_rate);
+                if (typeof x.pidstats !== 'undefined') {
+                    $('#heat').html('<div class="bar" style="height:'+x.pidstats.out*70+'%;"></div>')
                     }
                 if (x.cool > 0.5) { $('#cool').addClass("ds-led-cool-active"); } else { $('#cool').removeClass("ds-led-cool-active"); }
                 if (x.air > 0.5) { $('#air').addClass("ds-led-air-active"); } else { $('#air').removeClass("ds-led-air-active"); }
@@ -596,6 +612,7 @@ $(document).ready(function()
 
             $('#act_temp_scale').html('º'+temp_scale_display);
             $('#target_temp_scale').html('º'+temp_scale_display);
+            $('#heat_rate_temp_scale').html('º'+temp_scale_display);
 
             switch(time_scale_profile){
                 case "s":
